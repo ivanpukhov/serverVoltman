@@ -5,6 +5,9 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const app = express();
+const multer = require('multer');
+const fs = require('fs');
+const csv = require('csv-parser');
 
 const port = process.env.PORT || 3001;
 const dbPath = process.env.DB_PATH || 'old_database.db';
@@ -80,6 +83,88 @@ const initializeDatabase = () => {
     });
 };
 
+const upload = multer({ dest: 'uploads-csv/' });
+
+app.post('/upload-csv', upload.single('file'), async (req, res) => {
+    const filePath = req.file.path;
+
+    fs.createReadStream(filePath)
+        .pipe(csv())
+        .on('data', async (row) => {
+            const {
+                model,
+                capacity_ah,
+                cold_cranking_amps_en,
+                length_mm,
+                width_mm,
+                height_mm,
+                weight_kg,
+                wholesale_price,
+                retail_price,
+                category_id,
+                photo
+            } = row;
+
+            const sql = `
+                INSERT INTO products (
+                    model,
+                    capacity_ah,
+                    cold_cranking_amps_en,
+                    length_mm,
+                    width_mm,
+                    height_mm,
+                    weight_kg,
+                    wholesale_price,
+                    retail_price,
+                    category_id,
+                    photo
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            await runQuery(sql, [
+                model,
+                capacity_ah,
+                cold_cranking_amps_en,
+                length_mm,
+                width_mm,
+                height_mm,
+                weight_kg,
+                wholesale_price,
+                retail_price,
+                category_id,
+                photo
+            ]);
+        })
+        .on('end', () => {
+            fs.unlinkSync(filePath);
+            res.status(200).send('CSV файл успешно обработан');
+        });
+});
+app.post('/add-category', async (req, res) => {
+    try {
+        const { name } = req.body; // Получаем имя категории из тела запроса
+        if (!name) {
+            return res.status(400).json({ error: 'Name is required' });
+        }
+
+        const insertSql = 'INSERT INTO categories (name) VALUES (?)';
+        await new Promise((resolve, reject) => {
+            db.run(insertSql, [name], function (err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(this.lastID); // this.lastID содержит ID последней вставленной строки
+                }
+            });
+        });
+
+        res.status(201).json({ message: 'Category added successfully' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
 
 
 // Функция для генерации JWT
@@ -94,7 +179,7 @@ const send_message = async (message) => {
     const url = `https://api.green-api.com/waInstance${idInstance}/sendMessage/${apiTokenInstance}`;
 
     const payload = {
-        chatId: `77770978675@c.us`, message: `${message}`
+        chatId: `77771542668@c.us`, message: `${message}`
     };
 
     const headers = {
@@ -109,35 +194,59 @@ const send_message = async (message) => {
     }
 };
 
-// Функция для составления уведомления администратору
 const composeAdminNotification = async (order_id) => {
     try {
+        console.log(`Начинаем составление уведомления для заказа с ID: ${order_id}`);
+
         const [order] = await runQuery('SELECT * FROM orders WHERE id = ?', [order_id]);
+        if (!order) {
+            console.log(`Заказ с ID: ${order_id} не найден`);
+        }
+
         const items = await runQuery('SELECT * FROM order_items WHERE order_id = ?', [order_id]);
+        if (!items || items.length === 0) {
+            console.log(`Товары для заказа с ID: ${order_id} отсутствуют`);
+        }
 
         let totalRetailPrice = 0;
-        const itemDetails = await Promise.all(items.map(async (item) => {
-            const [product] = await runQuery('SELECT * FROM products WHERE id = ?', [item.product_id]);
-            totalRetailPrice += product.retail_price * item.quantity;
+        let itemDetails = 'Отсутствуют';
 
-            return `${product.model} (Количество: ${item.quantity})`;
-        }));
+        if (items && items.length > 0) {
+            itemDetails = await Promise.all(items.map(async (item) => {
+                const [product] = await runQuery('SELECT * FROM products WHERE id = ?', [item.product_id]);
 
-        const message = `*Новый заказ: #${order.id}* 🎉
-*Имя*: ${order.customer_name}
-*Номер телефона*: ${order.customer_phone}
-*Адрес*: ${order.address}
+                if (!product) {
+                    console.log(`Продукт с ID: ${item.product_id} не найден`);
+                    return `Консультация. Заказ: обратный звонок`;
+                }
+
+                totalRetailPrice += product.retail_price * item.quantity;
+                return `${product.model} (Количество: ${item.quantity})`;
+            }));
+
+            itemDetails = itemDetails.join('\n    - ');
+        }
+
+        const message = `*Новый заказ: #${order ? order.id : 'Отсутствует'}* 🎉
+*Имя*: ${order ? order.customer_name : 'Отсутствует'}
+*Номер телефона*: ${order ? order.customer_phone : 'Отсутствует'}
+*Адрес*: ${order ? order.address : 'Отсутствует'}
 *Товары*: 
-    - ${itemDetails.join('\n    - ')}\n
+    - ${itemDetails}\n
 *Общая стоимость*: ${totalRetailPrice}`;
 
-        await send_message(message)
-        console.log("Уведомление админу:", message);  // Здесь вы можете заменить на отправку email или другой способ уведомления
+        console.log("Сформированное сообщение:", message);
+
+        await send_message(message);
+        console.log("Уведомление админу отправлено успешно");
     } catch (err) {
         console.error("Ошибка при составлении уведомления:", err);
     }
 };
-app.post('/order', async (req, res) => {
+
+
+
+app.post('/api/order', async (req, res) => {
     try {
         let {customer_name, customer_phone, address, items} = req.body;  // добавлены новые поля
 
@@ -174,7 +283,7 @@ app.post('/order', async (req, res) => {
 });
 
 // Маршрут для авторизации
-app.post('/login', async (req, res) => {
+app.post('/api/login', async (req, res) => {
     const {username, password} = req.body;
     if (username === "admin" && password === "admin") {
         const token = generateAccessToken(username);
@@ -198,7 +307,7 @@ const authenticateToken = (req, res, next) => {
 }
 
 // Получение всех заказов (только для авторизованных пользователей)
-app.get('/orders', authenticateToken, async (req, res) => {
+app.get('/api/orders', authenticateToken, async (req, res) => {
     try {
         const orders = await runQuery('SELECT * FROM orders');
         res.send({orders});
@@ -208,7 +317,7 @@ app.get('/orders', authenticateToken, async (req, res) => {
 });
 
 // Получение информации о конкретном заказе (только для авторизованных пользователей)
-app.get('/order/:id', authenticateToken, async (req, res) => {
+app.get('/api/order/:id', authenticateToken, async (req, res) => {
     const {id} = req.params;
     try {
         const [order] = await runQuery('SELECT * FROM orders WHERE id = ?', [id]);
@@ -230,7 +339,7 @@ const attachCategories = async (req, res, next) => {
 };
 
 app.use(attachCategories); // Используем middleware
-app.get('/products-retail', async (req, res) => {
+app.get('/api/products-retail', async (req, res) => {
     try {
         let sql = 'SELECT * FROM products WHERE retail_price IS NOT NULL';
         const params = [];
@@ -276,7 +385,7 @@ app.get('/products-retail', async (req, res) => {
         console.log("SQL Query:", sql);
         console.log("SQL Params:", params);
         const products = await runQuery(sql, params);
-        console.log("Retrieved products:", products);
+        // console.log("Retrieved products:", products);
         res.send({products: filteredProducts, filterOptions});
     } catch (err) {
         res.status(400).send({error: err.message});
@@ -285,7 +394,7 @@ app.get('/products-retail', async (req, res) => {
 
 
 
-app.get('/products-wholesale', async (req, res) => {
+app.get('/api/products-wholesale', async (req, res) => {
     try {
         let sql = 'SELECT * FROM products WHERE wholesale_price IS NOT NULL';
         const params = [];
@@ -341,7 +450,7 @@ app.get('/products-wholesale', async (req, res) => {
     }
 });
 
-app.get('/categories', async (req, res) => {
+app.get('/api/categories', async (req, res) => {
     try {
         const categories = await runQuery('SELECT * FROM categories');
         res.send({categories});
@@ -349,7 +458,7 @@ app.get('/categories', async (req, res) => {
         res.status(400).send({error: err.message});
     }
 });
-app.get('/categories', async (req, res) => {
+app.get('/api/categories', async (req, res) => {
     try {
         const categories = await runQuery('SELECT * FROM categories');
         res.send({categories});
@@ -358,7 +467,7 @@ app.get('/categories', async (req, res) => {
     }
 });
 
-app.get('/product/:id', async (req, res) => {
+app.get('/api/product/:id', async (req, res) => {
     const {id} = req.params;
     try {
         // Получение информации о продукте
@@ -373,7 +482,7 @@ app.get('/product/:id', async (req, res) => {
     }
 });
 
-app.get('/best-products', async (req, res) => {
+app.get('/api/best-products', async (req, res) => {
     try {
         // Получение 4 наиболее просматриваемых продуктов
         const bestProducts = await runQuery('SELECT * FROM products ORDER BY views DESC LIMIT 4');
@@ -385,10 +494,10 @@ app.get('/best-products', async (req, res) => {
 });
 
 
-app.use('/uploads', express.static('uploads'));
+app.use('/api/uploads', express.static('uploads'));
 
 
-app.get('/search', async (req, res) => {
+app.get('/api/search', async (req, res) => {
     try {
         const {query} = req.query;
         if (!query) {
