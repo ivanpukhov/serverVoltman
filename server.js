@@ -343,7 +343,9 @@ app.get('/api/products-retail', async (req, res) => {
     try {
         let sql = 'SELECT * FROM products WHERE retail_price IS NOT NULL';
         const params = [];
-        const allowedFields = ['retail_price', 'capacity_ah', 'length_mm', 'width_mm', 'height_mm', 'weight_kg', 'category_id', 'min_retail_price', 'max_retail_price'];
+
+        // Добавляем min_capacity_ah и max_capacity_ah в список разрешенных полей для фильтрации
+        const allowedFields = ['retail_price', 'length_mm', 'width_mm', 'height_mm', 'weight_kg', 'category_id', 'min_retail_price', 'max_retail_price', 'min_capacity_ah', 'max_capacity_ah'];
 
         allowedFields.forEach(field => {
             if (req.query[field]) {
@@ -373,7 +375,6 @@ app.get('/api/products-retail', async (req, res) => {
             }
         }
 
-
         const filteredProducts = await runQuery(sql, params);
 
         const [categories] = await Promise.all([runQuery('SELECT id, name FROM categories')]);
@@ -382,16 +383,17 @@ app.get('/api/products-retail', async (req, res) => {
             acc[field] = Array.from(new Set(filteredProducts.map(p => p[field])));
             return acc;
         }, {categories});
+
         console.log("SQL Query:", sql);
         console.log("SQL Params:", params);
+
         const products = await runQuery(sql, params);
-        // console.log("Retrieved products:", products);
+
         res.send({products: filteredProducts, filterOptions});
     } catch (err) {
         res.status(400).send({error: err.message});
     }
 });
-
 
 
 app.get('/api/products-wholesale', async (req, res) => {
