@@ -179,7 +179,7 @@ const send_message = async (message) => {
     const url = `https://api.green-api.com/waInstance${idInstance}/sendMessage/${apiTokenInstance}`;
 
     const payload = {
-        chatId: `77771542668@c.us`, message: `${message}`
+        chatId: `77053477049git @c.us`, message: `${message}`
     };
 
     const headers = {
